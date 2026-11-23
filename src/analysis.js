@@ -10,6 +10,7 @@ export const DEFAULT_ASSUMPTIONS = Object.freeze({
 export const EXCLUDED_CATEGORIES = new Set(['Shunting', 'Locomotive', 'On-track machines', 'Test drive']);
 export const ON_TIME_SEC = 180;
 const MIN_N_FOR_BETA = 5;
+const THEIL_SEN_MAX_PAIRS = 1500; // same pair budget for the point fit and every bootstrap replicate
 const BETA_MAX = 1.5;
 const LEVERAGE_CAP = 3.0;
 const DIST_EDGES_MIN = [0, 1, 3, 5, 10, 20]; // bins: <0, 0-1, 1-3, 3-5, 5-10, 10-20, 20+
@@ -226,11 +227,12 @@ export function analyseDays(trains, opts = {}) {
   const all = [...sections.values()];
   for (const s of all) {
     if (s.n >= MIN_N_FOR_BETA) {
-      const fit = theilSen(s._xs, s._ys);
+      const fit = theilSen(s._xs, s._ys, THEIL_SEN_MAX_PAIRS);
       s.alpha = fit.alpha; s.beta = fit.beta;
       if (s.beta != null) {
         const idx = s._xs.map((_, i) => i);
-        s.betaCI = bootstrap(idx, ix => theilSen(ix.map(i => s._xs[i]), ix.map(i => s._ys[i]), 600).beta, B, rng);
+        const fitRng = mulberry32(Math.floor(rng() * 4294967296)); // per-section stream, advances across replicates
+        s.betaCI = bootstrap(idx, ix => theilSen(ix.map(i => s._xs[i]), ix.map(i => s._ys[i]), THEIL_SEN_MAX_PAIRS, fitRng).beta, B, rng);
       }
     }
   }

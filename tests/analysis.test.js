@@ -146,3 +146,20 @@ test('leverage uses downstream beta products (capped) and is efficient', () => {
   approx(a.sections.get('C-D').leverage, 1, 1e-6);
   approx(a.sections.get('D-E').leverage, 0, 1e-6);
 });
+
+test('betaCI brackets beta on noisy seeded data (exact and sampled pair regimes)', () => {
+  for (const N of [40, 150]) {
+    const r = mulberry32(99 + N), trains = [];
+    for (let i = 0; i < N; i++) {
+      const t = T(i), x = Math.floor(r() * 600), noise = (r() - 0.5) * 240;
+      const base = Date.parse(t.timeTableRows[0].scheduledTime), arr = Date.parse(t.timeTableRows[1].scheduledTime);
+      t.timeTableRows[0].actualTime = new Date(base + x * 1000).toISOString();
+      t.timeTableRows[1].actualTime = new Date(arr + (20 + 0.7 * x + noise) * 1000).toISOString();
+      trains.push(t);
+    }
+    const s = analyseDays(trains, { seed: 5 }).sections.get('A-B');
+    assert(s.betaCI.lo <= s.beta && s.beta <= s.betaCI.hi, `N=${N} beta ${s.beta} CI ${JSON.stringify(s.betaCI)}`);
+    assert(s.betaCI.hi - s.betaCI.lo > 0, 'CI has width');
+    approx(s.beta, 0.7, 0.1);
+  }
+});

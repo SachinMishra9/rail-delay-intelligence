@@ -17,6 +17,7 @@ const DELAY_STEPS = [[30, '--d0'], [60, '--d1'], [120, '--d2'], [240, '--d3'], [
 const LIVE_STEPS = [[60, '--d0'], [180, '--d1'], [300, '--d2'], [600, '--d3'], [Infinity, '--d4']];
 const colorFor = (v, steps) => cssVar(steps.find(([t]) => v < t)[1]);
 
+const IN_ARTIFACT = location.hostname.endsWith('claude.ai') || location.hostname.endsWith('claudeusercontent.com') || location.protocol === 'blob:';
 const state = {
   stations: new Map(), causeNames: new Map(), analysis: null, assumptions: structuredClone(DEFAULT_ASSUMPTIONS),
   selected: null, live: new Map(), liveVersion: 0, charts: {}, templates: [], store: null, sampler: undefined, lastReport: '',
@@ -32,7 +33,7 @@ $('#theme').onclick = () => {
   const dark = root.dataset.theme ? root.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
   root.dataset.theme = dark ? 'light' : 'dark';
   try { localStorage.setItem('rdi.theme', root.dataset.theme); } catch { }
-  setTiles(); redrawAll();
+  setTiles(); redrawAll(); startHero();
 };
 try { const t = localStorage.getItem('rdi.theme'); if (t) document.documentElement.dataset.theme = t; } catch { }
 const isDark = () => getComputedStyle(document.documentElement).colorScheme === 'dark';
@@ -45,6 +46,7 @@ function setTiles() {
   if (tiles) map.removeLayer(tiles);
   tiles = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
     { attribution: '© OpenStreetMap contributors', maxZoom: 18, className: 'basemap' }).addTo(map);
+  let errs = 0; tiles.on('tileerror', () => { if (++errs === 4) map.removeLayer(tiles); }); // host blocks tiles: the network itself is the map
 }
 setTiles();
 const sectionLayer = L.layerGroup().addTo(map);
@@ -80,7 +82,7 @@ let liveTimer, delayTimer;
 async function refreshLiveDelays() {
   try {
     if (!state.liveVersion) {
-      const today = new Date().toISOString().slice(0, 10);
+      const today = hkiDate(Date.now());
       const trains = await loadDay(today);
       for (const t of trains) { state.live.set(t.trainNumber, t); state.liveVersion = Math.max(state.liveVersion, t.version); }
     } else {
@@ -92,11 +94,11 @@ async function refreshLiveDelays() {
 async function refreshLive() {
   if (!$('#live').checked) { liveLayer.clearLayers(); return; }
   try {
-    const gj = await loadLive();
+    const gj = state.snapshot ? state.snapshot.live : await loadLive();
     liveLayer.clearLayers();
     for (const f of gj.features) {
       const p = f.properties, t = state.live.get(p.trainNumber);
-      const d = t ? currentDelay(t) : null;
+      const d = state.snapshot ? state.snapshot.liveDelays[p.trainNumber]?.d ?? null : t ? currentDelay(t) : null;
       const [lon, lat] = f.geometry.coordinates;
       const m = L.circleMarker([lat, lon], { renderer, radius: 5, weight: 1.5, color: cssVar('--surface'), fillOpacity: 1, fillColor: d == null ? cssVar('--muted') : colorFor(d, LIVE_STEPS) });
       const label = t ? `${t.trainType} ${t.trainNumber}` : `Train ${p.trainNumber}`;
@@ -104,12 +106,13 @@ async function refreshLive() {
       liveLayer.addLayer(m);
     }
     state.liveGeo = gj;
-    setStatus(`${gj.features.length} trains live · ${new Date().toLocaleTimeString('en-GB')}`);
+    setStatus(state.snapshot ? `${gj.features.length} trains · positions at ${new Date(state.snapshot.generatedAt).toLocaleString('en-GB', { timeZone: 'Europe/Helsinki', dateStyle: 'medium', timeStyle: 'short' })}` : `${gj.features.length} trains live · ${new Date().toLocaleTimeString('en-GB')}`);
   } catch (e) { setStatus('Live positions unavailable: ' + e.message, true); }
 }
 function startLive() {
   clearInterval(liveTimer); clearInterval(delayTimer);
   if (!$('#live').checked) { liveLayer.clearLayers(); return; }
+  if (state.snapshot) { refreshLive(); return; }
   refreshLiveDelays().then(refreshLive);
   liveTimer = setInterval(refreshLive, 15000);
   delayTimer = setInterval(refreshLiveDelays, 60000);
@@ -118,9 +121,10 @@ $('#live').onchange = startLive;
 
 // ---------- analysis (worker with main-thread fallback) ----------
 let worker, reqId = 0;
+const hkiDate = t => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Helsinki' }).format(t); // Finnish operating day, YYYY-MM-DD
 function datesFor(n) {
   const out = [];
-  for (let i = 1; i <= n; i++) out.push(new Date(Date.now() - i * 864e5).toISOString().slice(0, 10));
+  for (let i = 1; i <= n; i++) out.push(hkiDate(Date.now() - i * 864e5));
   return out;
 }
 function analyse(dates) {
@@ -151,7 +155,7 @@ function analyse(dates) {
 async function runAnalysis() {
   renderKPIs(true);
   try {
-    state.analysis = await analyse(datesFor(+$('#days').value));
+    state.analysis = state.snapshot ? state.snapshot.analysis : await analyse(datesFor(+$('#days').value));
     state.selected = null; $('#fp').classList.add('hidden');
     redrawAll();
     setStatus(`Analysed ${nf0.format(state.analysis.kpis.trains)} trains`);
@@ -166,6 +170,7 @@ $('#days').onchange = runAnalysis;
 function redrawAll() {
   drawLegend();
   if (!state.analysis) return;
+  renderHome();
   renderKPIs(); drawSections(); renderOpps(); renderSections(); renderStations(); renderCauses(); renderWhatIf(); renderHistory(); renderAssumptions();
   if (state.selected) selectSection(state.selected, false);
 }
@@ -233,7 +238,7 @@ function scatter(s) {
   const step = Math.max(1, Math.floor(xs.length / 600));
   const pts = []; for (let i = 0; i < xs.length; i += step) pts.push({ x: xs[i] / 60, y: ys[i] / 60 });
   const lo = Math.min(0, ...pts.map(p => p.x)), hi = Math.max(1, ...pts.map(p => p.x));
-  const ds = [{ type: 'scatter', label: 'Train runs', data: pts, pointRadius: 2, backgroundColor: cssVar('--accent') + '88' },
+  const ds = [{ type: 'scatter', label: 'Train runs', data: pts, pointRadius: 2, backgroundColor: cssVar('--navy') + '99' },
     { type: 'line', label: 'No change (y=x)', data: [{ x: lo, y: lo }, { x: hi, y: hi }], borderColor: cssVar('--muted'), borderDash: [4, 4], pointRadius: 0, borderWidth: 1 }];
   if (s.beta != null) ds.push({ type: 'line', label: `Theil–Sen fit β=${num(s.beta)}`, data: [{ x: lo, y: (s.alpha + s.beta * lo * 60) / 60 }, { x: hi, y: (s.alpha + s.beta * hi * 60) / 60 }], borderColor: cssVar('--bad'), pointRadius: 0, borderWidth: 2 });
   makeChart('fpChart', { data: { datasets: ds }, options: { plugins: { legend: { labels: { boxWidth: 10, font: { size: 10 } } } },
@@ -249,13 +254,13 @@ function renderOpps() {
     <p class="lead">Line sections ranked by the estimated cost of the delay they <i>create</i>. Each one comes with its statistical evidence and the intervention its fingerprint points to.</p>
     <div class="toolbar"><span class="muted">Top 15 total: <b>${eur(total)}/day</b> · ${eur(total * 365)}/yr (est.)</span><span style="flex:1"></span><button id="oppCsv">⬇ CSV</button></div>
     ${opps.map(({ s, eurPerDay }, i) => {
-      const iv = interventionFor(s);
+      const iv = interventionFor(s), w = Math.round(eurPerDay / (opps[0]?.eurPerDay || 1) * 100);
       return `<div class="opp" data-key="${esc(s.key)}"><div class="rank">${i + 1}</div><div>
         <div class="t">${esc(secName(s))}</div>
         <div class="chips"><span class="chip">n=${s.n}</span><span class="chip">α=${s.alpha == null ? '–' : num(s.alpha, 0) + 's'}</span>
         <span class="chip ${s.beta > 1.05 ? 'amp' : ''}">β=${num(s.beta)}${s.betaCI ? ` [${num(s.betaCI.lo, 1)}–${num(s.betaCI.hi, 1)}]` : ''}</span><span class="chip">lev=${num(s.leverage, 1)}</span>
         <span class="chip svc">${esc(iv.service)}</span></div>
-        <div class="fix">${esc(iv.fix)} – ${esc(iv.why)}</div></div>
+        <div class="fix">${esc(iv.fix)} – ${esc(iv.why)}</div><div class="bar"><i style="width:${w}%"></i></div></div>
         <div class="eur">${eur(eurPerDay)}<small>per day</small></div></div>`;
     }).join('') || '<div class="note">No delay created in this period.</div>'}`;
   document.querySelectorAll('#tab-opps .opp').forEach(el => el.onclick = () => selectSection(el.dataset.key));
@@ -299,7 +304,8 @@ function renderStations() {
   $('#stCsv').onclick = () => download('stations.csv', toCSV([...state.analysis.stations.values()].map(s => ({ code: s.code, name: name(s.code), arrivals: s.n, mean_arr_delay_s: Math.round(s.meanArrDelay), dwell_created_s: Math.round(s.dwellCreated) }))), 'text/csv');
 }
 async function stationBoard(code) {
-  const box = $('#stBoard'); box.innerHTML = `<div class="note">Loading live board for ${esc(name(code))}…</div>`;
+  const box = $('#stBoard');
+  if (state.snapshot) { box.innerHTML = `<div class="note">The live station board for ${esc(name(code))} needs the live version of this tool. This page shows a snapshot.</div>`; return; } box.innerHTML = `<div class="note">Loading live board for ${esc(name(code))}…</div>`;
   const st = state.stations.get(code); if (st) map.flyTo([st.lat, st.lon], 11, { duration: 0.6 });
   try {
     const res = await fetch(`${API}/live-trains/station/${encodeURIComponent(code)}?arrived_trains=6&arriving_trains=6&departed_trains=0&departing_trains=0&include_nonstopping=false`, { headers: { 'Digitraffic-User': 'rail-delay-intelligence-demo' } });
@@ -325,12 +331,12 @@ function renderCauses() {
   const codes = Object.entries(c.byCode).sort((a, b) => b[1] - a[1]).slice(0, 12);
   $('#tab-causes').innerHTML = `<h3>Who can fix it?</h3>
     <p class="lead">Official delay cause codes recorded by traffic control, grouped by the party that can act on them.</p>
-    <div class="card"><div class="big">${nf0.format(addressable)}%</div><div class="muted">of coded delay events trace to infrastructure, track works or capacity, the problems infrastructure-owner consulting addresses.</div></div>
+    <div class="statline"><div class="big">${nf0.format(addressable)}%</div><div class="muted">of coded delay events trace to infrastructure, track works or capacity, the problems infrastructure-owner consulting addresses.</div></div>
     <div class="toolbar" style="margin-top:12px"><span style="flex:1"></span><button id="causePng">⬇ PNG</button><button id="causeCsv">⬇ CSV</button></div>
     <div class="chartbox"><canvas id="causeChart"></canvas></div>
     <table><thead><tr><th>Code</th><th>Description (FI)</th><th class="n">Events</th></tr></thead><tbody>
     ${codes.map(([k, n]) => `<tr><td class="mono">${esc(k)}</td><td>${esc(state.causeNames.get(k) || '')}</td><td class="n">${n}</td></tr>`).join('')}</tbody></table>`;
-  const pal = ['--d4', '--d3', '--accent', '--d1', '--muted'];
+  const pal = ['--d4', '--d3', '--navy', '--d1', '--muted'];
   makeChart('causeChart', { type: 'bar', data: { labels: buckets.map(b => BUCKET_LABEL[b]), datasets: [{ data: buckets.map(b => c.byBucket[b]), backgroundColor: buckets.map((b, i) => cssVar(pal[Object.keys(BUCKET_LABEL).indexOf(b)] || pal[i])), borderRadius: 6 }] },
     options: { indexAxis: 'y', plugins: { legend: { display: false } } } });
   $('#causePng').onclick = () => chartPNG(state.charts.causeChart, 'delay-causes.png');
@@ -358,11 +364,11 @@ function renderWhatIf() {
     const days = state.analysis.kpis.days || 1, direct = sectionCost(s, state.assumptions) / days * pct, network = direct * (1 + (s.leverage || 0));
     const yrD = direct * 365, yrN = network * 365;
     $('#wiPctV').textContent = Math.round(pct * 100) + '%';
-    $('#wiOut').innerHTML = `<div class="kpis" style="padding:0;grid-template-columns:repeat(2,minmax(0,1fr))">
-      <div class="kpi"><div class="l">Direct saving</div><div class="v">${eur(yrD)}/yr</div><div class="s">${eur(direct)}/day</div></div>
-      <div class="kpi"><div class="l">Incl. network knock-on</div><div class="v">${eur(yrN)}/yr</div><div class="s">× (1 + leverage ${num(s.leverage)})</div></div>
-      <div class="kpi"><div class="l">Simple payback</div><div class="v">${yrN > 0 ? nf1.format(capex / yrN) + ' yrs' : '–'}</div><div class="s">direct only: ${yrD > 0 ? nf1.format(capex / yrD) : '–'} yrs</div></div>
-      <div class="kpi"><div class="l">30-yr benefit (undiscounted)</div><div class="v">${eur(yrN * 30)}</div><div class="s">BCR ≈ ${capex ? nf1.format(yrN * 30 / capex) : '–'} (rough)</div></div></div>
+    $('#wiOut').innerHTML = `<div class="wi-grid">
+      <div class="wi"><div class="l">Direct saving</div><div class="v">${eur(yrD)}/yr</div><div class="s">${eur(direct)}/day</div></div>
+      <div class="wi"><div class="l">Incl. network knock-on</div><div class="v">${eur(yrN)}/yr</div><div class="s">× (1 + leverage ${num(s.leverage)})</div></div>
+      <div class="wi"><div class="l">Simple payback</div><div class="v">${yrN > 0 ? nf1.format(capex / yrN) + ' yrs' : '–'}</div><div class="s">direct only: ${yrD > 0 ? nf1.format(capex / yrD) : '–'} yrs</div></div>
+      <div class="wi"><div class="l">30-yr benefit (undiscounted)</div><div class="v">${eur(yrN * 30)}</div><div class="s">BCR ≈ ${capex ? nf1.format(yrN * 30 / capex) : '–'} (rough)</div></div></div>
       <div class="note">Suggested intervention: <b>${esc(interventionFor(s).fix)}</b>. Passenger-time benefit only; excludes operating savings and reliability premiums. A full socio-economic appraisal per Väylävirasto guidelines is the natural next study.</div>`;
   };
   ['wiSec', 'wiPct', 'wiCapex'].forEach(id => $('#' + id).oninput = calc);
@@ -395,7 +401,7 @@ async function renderHistory() {
     $('#hSec').onchange = e => { state.selected = e.target.value; draw(); };
     makeChart('hChart', { type: 'line', data: { labels: series.map(p => p.id), datasets: [
       { label: 'β propagation', data: series.map(p => p.s?.beta ?? null), borderColor: cssVar('--bad'), yAxisID: 'y', spanGaps: true },
-      { label: 'Created min/day', data: series.map(p => p.s ? p.s.createdMinPerDay : null), borderColor: cssVar('--accent'), yAxisID: 'y1', spanGaps: true }] },
+      { label: 'Created min/day', data: series.map(p => p.s ? p.s.createdMinPerDay : null), borderColor: cssVar('--navy'), yAxisID: 'y1', spanGaps: true }] },
       options: { scales: { y: { title: { display: true, text: 'β' } }, y1: { position: 'right', grid: { drawOnChartArea: false }, title: { display: true, text: 'min/day' } } } } });
     $('#hCsv').onclick = () => download('fingerprint-history.csv', toCSV(hist.flatMap(h => h.sections.map(s => ({ snapshot: h.id, ...s })))), 'text/csv');
   };
@@ -463,7 +469,7 @@ function renderReport(selectedId) {
     <div id="tplForm"></div>
     <div class="muted" style="font-size:12px;margin:6px 0">Sections: ${cur.sections.map(esc).join(' · ')} · ${esc(cur.language)} · ${esc(cur.tone)}</div>
     <div class="report-out" id="repOut">${state.lastReport ? mdToHtml(state.lastReport) : '<p class="muted">The generated report appears here.</p>'}</div>
-    <div class="toolbar" style="margin-top:8px"><button id="repMd" ${state.lastReport ? '' : 'disabled'}>⬇ Markdown</button><button id="repHtml" ${state.lastReport ? '' : 'disabled'}>⬇ HTML</button><button id="repPdf" ${state.lastReport ? '' : 'disabled'}>Print / PDF</button><button id="repCopy" ${state.lastReport ? '' : 'disabled'}>Copy</button></div>`;
+    <div class="toolbar" style="margin-top:8px"><button id="repMd" ${state.lastReport ? '' : 'disabled'}>⬇ Markdown</button><button id="repHtml" ${state.lastReport ? '' : 'disabled'}>⬇ HTML</button>${IN_ARTIFACT ? '' : `<button id="repPdf" ${state.lastReport ? '' : 'disabled'}>Print / PDF</button>`}<button id="repCopy" ${state.lastReport ? '' : 'disabled'}>Copy</button></div>`;
   const tpl = () => state.templates.find(t => t.id === $('#tplSel').value);
   $('#tplSel').onchange = e => renderReport(e.target.value);
   $('#genBtn').onclick = () => generate(tpl());
@@ -471,19 +477,23 @@ function renderReport(selectedId) {
   $('#tplNew').onclick = () => templateForm({ id: 'tpl-' + Date.now().toString(36), name: 'My template', audience: '', language: 'English', tone: 'Professional', sections: ['Summary', 'Findings', 'Recommendations'], instructions: '' });
   $('#tplDup').onclick = () => { const t = tpl(); templateForm({ ...structuredClone(t), id: 'tpl-' + Date.now().toString(36), name: t.name + ' (copy)', builtin: undefined }); };
   $('#tplEdit').onclick = () => templateForm(structuredClone(tpl()));
-  $('#tplDel').onclick = async () => { const t = tpl(); if (!confirm(`Delete template “${t.name}”?`)) return; await state.store.remove(t.id); await loadTemplates(); renderReport(); };
+  $('#tplDel').onclick = async e => {
+    const t = tpl(), b = e.currentTarget;
+    if (b.dataset.armed !== '1') { b.dataset.armed = '1'; b.textContent = `Confirm delete “${t.name}”`; b.classList.add('primary'); return; }
+    await state.store.remove(t.id); await loadTemplates(); renderReport();
+  };
   $('#tplExp').onclick = () => download('report-templates.json', JSON.stringify(state.templates.filter(t => !t.builtin), null, 2), 'application/json');
   $('#tplImp').onchange = async e => {
     try {
       const list = JSON.parse(await e.target.files[0].text());
       for (const t of [].concat(list)) if (t?.name && Array.isArray(t.sections)) await state.store.save(sanitizeTpl({ ...t, id: t.id && !t.builtin ? t.id : 'tpl-' + Math.random().toString(36).slice(2, 9) }));
       await loadTemplates(); renderReport();
-    } catch (err) { alert('Import failed: ' + err.message); }
+    } catch (err) { $('#tplForm').innerHTML = `<div class="note">Import failed: ${esc(err.message)}. Choose a JSON file exported from this tool.</div>`; }
   };
   const md = () => state.lastReport, title = () => `Rail delay report – ${tpl().name}`;
   $('#repMd').onclick = () => download('rail-delay-report.md', md(), 'text/markdown');
   $('#repHtml').onclick = () => download('rail-delay-report.html', reportHTML(title(), md()), 'text/html');
-  $('#repPdf').onclick = () => printReport(title(), md());
+  if ($('#repPdf')) $('#repPdf').onclick = () => printReport(title(), md());
   $('#repCopy').onclick = async () => { try { await navigator.clipboard.writeText(md()); $('#repCopy').textContent = 'Copied ✓'; } catch { $('#repCopy').textContent = 'Copy blocked'; } };
 }
 const sanitizeTpl = t => ({ id: String(t.id).slice(0, 60), name: String(t.name).slice(0, 80), audience: String(t.audience || '').slice(0, 300), language: String(t.language || 'English').slice(0, 40), tone: String(t.tone || '').slice(0, 120), sections: t.sections.map(s => String(s).slice(0, 120)).slice(0, 12), instructions: String(t.instructions || '').slice(0, 2000) });
@@ -495,12 +505,13 @@ function templateForm(t) {
     <label>Tone<input id="fTone" value="${esc(t.tone)}"></label>
     <label>Sections (one per line, in order)<textarea id="fSec" rows="5">${esc(t.sections.join('\n'))}</textarea></label>
     <label>Instructions<textarea id="fIns" rows="3">${esc(t.instructions)}</textarea></label>
-    <div class="toolbar"><button class="primary" id="fSave">Save template</button><button id="fCancel">Cancel</button></div></div>`;
+    <div class="toolbar"><button class="primary" id="fSave">Save template</button><button id="fCancel">Cancel</button><span id="fMsg" class="inline-confirm"></span></div></div>`;
   $('#fCancel').onclick = () => $('#tplForm').innerHTML = '';
   $('#fSave').onclick = async () => {
     const nt = sanitizeTpl({ id: t.id, name: $('#fName').value || 'Untitled', audience: $('#fAud').value, language: $('#fLang').value, tone: $('#fTone').value, sections: $('#fSec').value.split('\n').map(s => s.trim()).filter(Boolean), instructions: $('#fIns').value });
-    if (!nt.sections.length) { alert('Add at least one section'); return; }
-    try { await state.store.save(nt); } catch (e) { alert('Could not save: ' + (e.message || e.code)); return; }
+    const msg = t => { $('#fMsg').textContent = t; };
+    if (!nt.sections.length) { msg('Add at least one section.'); return; }
+    try { await state.store.save(nt); } catch (e) { msg('Could not save: ' + (e.message || e.code)); return; }
     await loadTemplates(); renderReport(nt.id);
   };
 }
@@ -530,6 +541,97 @@ async function ask() {
   } catch (e) { out.innerHTML = `<div class="note">${esc(e.code === 'rate_limited' ? 'Rate limited, try again shortly.' : 'AI error: ' + (e.message || e.code))}</div>`; }
 }
 
+// ---------- snapshot mode (hosts that block outside requests) ----------
+async function loadSnapshot() {
+  const res = await fetch('data/snapshot.json'); if (!res.ok) throw new Error('no snapshot');
+  const snap = await res.json();
+  snap.analysis.sections = new Map(snap.analysis.sections); snap.analysis.stations = new Map(snap.analysis.stations);
+  state.snapshot = snap; state.stations = new Map(snap.stations); state.causeNames = new Map(snap.causeNames);
+  const d = new Date(snap.dates[0] + 'T12:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  $('.period').classList.add('hidden');
+  const b = $('#snapBadge'); b.textContent = `Snapshot · ${d}`; b.title = 'This host blocks live requests, so the page shows a pre-analysed day. Run the repo locally for live data.'; b.classList.remove('hidden');
+}
+
+// ---------- home ----------
+function renderHome() {
+  const a = state.analysis; if (!a) return;
+  const k = a.kpis, days = k.days || 1, c = costOf(a, state.assumptions);
+  const cb = a.causes.byBucket, tot = Object.values(cb).reduce((x, y) => x + y, 0) || 1;
+  const addr = ((cb.infrastructure || 0) + (cb.works || 0) + (cb.capacity || 0)) / tot * 100;
+  const dates = state.snapshot ? state.snapshot.dates : datesFor(+$('#days').value);
+  $('#heroDate').textContent = dates.length > 1 ? `${dates.at(-1)} – ${dates[0]}` : dates[0];
+  const vals = [nf0.format(k.trains), nf1.format(k.onTimePct) + '%', eur(c.eur / days * 365), nf0.format(addr) + '%'];
+  document.querySelectorAll('#heroStats .hv').forEach((el, i) => { el.textContent = vals[i]; el.classList.remove('skeleton'); });
+  $('#homeOpps').innerHTML = rankOpportunities(a, state.assumptions, 3).map(({ s, eurPerDay }, i) => {
+    const iv = interventionFor(s);
+    return `<a class="oc" href="#dashboard" data-key="${esc(s.key)}"><span class="rank">0${i + 1}</span><h3>${esc(secName(s))}</h3>
+      <div class="eur">${eur(eurPerDay * 365)}<small> / yr est.</small></div>
+      <div class="chips"><span class="chip ${s.beta > 1.05 ? 'amp' : ''}">β ${num(s.beta)}</span><span class="chip">α ${s.alpha == null ? '–' : num(s.alpha, 0) + ' s'}</span><span class="chip">${s.n} runs</span></div>
+      <div class="fix"><b>${esc(iv.fix)}</b><br>${esc(iv.service)}</div></a>`;
+  }).join('');
+  document.querySelectorAll('#homeOpps .oc').forEach(el => el.onclick = () => { pendingSelect = el.dataset.key; });
+  startHero();
+}
+let pendingSelect = null;
+
+// Hero: the real network drawn from today's sections, with trains pulsing along the costliest ones.
+let heroRaf;
+function startHero() {
+  cancelAnimationFrame(heroRaf);
+  const cv = $('#heroCanvas'), a = state.analysis; if (!cv || !a) return;
+  const ctx = cv.getContext('2d'), dpr = Math.min(2, devicePixelRatio || 1);
+  const W = cv.clientWidth, H = cv.clientHeight; if (!W || !H) return;
+  cv.width = W * dpr; cv.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const segs = [...a.sections.values()].map(s => [s, state.stations.get(s.from), state.stations.get(s.to)]).filter(([, A, B]) => A && B);
+  if (!segs.length) return;
+  // Equirectangular projection, Finland placed on the right side of the hero.
+  const lat0 = 59.6, lat1 = 68.2, lon0 = 20.5, lon1 = 31.8, k = Math.cos(64 * Math.PI / 180);
+  const aspect = ((lon1 - lon0) * k) / (lat1 - lat0), mapH = Math.min(H * 0.94, (W > 860 ? W * 0.4 : W * 0.9) / aspect), mapW = mapH * aspect;
+  const ox = W > 860 ? W - mapW - Math.max(24, (W - 1160) / 2) : (W - mapW) / 2, oy = (H - mapH) / 2;
+  const P = (lat, lon) => [ox + (lon - lon0) * k / ((lon1 - lon0) * k) * mapW, oy + (lat1 - lat) / (lat1 - lat0) * mapH];
+  const rule = cssVar('--rule'), ink = cssVar('--muted'), red = cssVar('--red');
+  const days = a.kpis.days || 1;
+  const hot = segs.map(([s, A, B]) => ({ s, A: P(A.lat, A.lon), B: P(B.lat, B.lon), e: sectionCost(s, state.assumptions) / days })).sort((x, y) => y.e - x.e);
+  const top = hot.slice(0, 40), maxE = top[0]?.e || 1;
+  const pulses = Array.from({ length: 70 }, (_, i) => ({ seg: hot[Math.floor(Math.random() * Math.min(hot.length, 400))], t: Math.random(), v: 0.002 + Math.random() * 0.004 }));
+  const still = matchMedia('(prefers-reduced-motion: reduce)').matches || W < 520;
+  const frame = () => {
+    ctx.clearRect(0, 0, W, H);
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = W < 860 ? rule : ink; ctx.globalAlpha = W < 860 ? 0.6 : 0.55; ctx.lineWidth = 1.4;
+    ctx.beginPath(); for (const h of hot) { ctx.moveTo(...h.A); ctx.lineTo(...h.B); } ctx.stroke();
+    ctx.globalAlpha = W < 860 ? 0.35 : 0.9; ctx.strokeStyle = red;
+    for (const h of top) { ctx.lineWidth = 1.5 + 4 * Math.sqrt(h.e / maxE); ctx.beginPath(); ctx.moveTo(...h.A); ctx.lineTo(...h.B); ctx.stroke(); }
+    if (!still) {
+      ctx.fillStyle = cssVar('--ink'); ctx.globalAlpha = W < 860 ? 0.3 : 0.75;
+      for (const p of pulses) {
+        p.t += p.v; if (p.t > 1) { p.t = 0; p.seg = hot[Math.floor(Math.random() * Math.min(hot.length, 400))]; }
+        const x = p.seg.A[0] + (p.seg.B[0] - p.seg.A[0]) * p.t, y = p.seg.A[1] + (p.seg.B[1] - p.seg.A[1]) * p.t;
+        ctx.beginPath(); ctx.arc(x, y, 1.8, 0, 7); ctx.fill();
+      }
+      heroRaf = requestAnimationFrame(frame);
+    }
+    ctx.globalAlpha = 1;
+  };
+  frame();
+}
+addEventListener('resize', () => { clearTimeout(startHero.t); startHero.t = setTimeout(startHero, 200); });
+
+// ---------- views (hash routing) ----------
+function route() {
+  const v = location.hash === '#dashboard' ? 'dashboard' : 'home';
+  if (location.hash === '#method') { $('#view-home').classList.remove('hidden'); return; }
+  document.querySelectorAll('.view').forEach(el => el.classList.toggle('hidden', el.id !== 'view-' + v));
+  document.querySelectorAll('.views a').forEach(a => a.classList.toggle('on', a.dataset.view === v));
+  if (v === 'dashboard') {
+    cancelAnimationFrame(heroRaf);
+    setTimeout(() => { map.invalidateSize(); if (pendingSelect) { selectSection(pendingSelect); pendingSelect = null; } }, 50);
+    scrollTo(0, 0);
+  } else startHero();
+}
+addEventListener('hashchange', route);
+document.querySelectorAll('[data-tab-link]').forEach(a => a.addEventListener('click', () => setTimeout(() => document.querySelector(`#tabs [data-tab=${a.dataset.tabLink}]`)?.click(), 60)));
+
 // ---------- tabs ----------
 document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
   document.querySelectorAll('#tabs button').forEach(x => x.classList.toggle('on', x === b));
@@ -539,11 +641,14 @@ document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
 
 // ---------- boot ----------
 (async function boot() {
-  drawLegend(); renderKPIs(true);
+  route(); drawLegend(); renderKPIs(true);
   setStatus('Loading stations…');
-  try { state.stations = await loadStations(); }
-  catch (e) { setStatus(e.message, true); $('#tab-opps').innerHTML = `<div class="note">Cannot reach digitraffic.fi: ${esc(e.message)}</div>`; return; }
-  loadCauseNames().then(m => { state.causeNames = m; if (state.analysis) renderCauses(); }).catch(() => { });
+  try { if (new URLSearchParams(location.search).has('snapshot')) throw new Error('snapshot requested'); state.stations = await loadStations(); }
+  catch (e) {
+    try { await loadSnapshot(); }
+    catch { setStatus(e.message, true); $('#tab-opps').innerHTML = `<div class="note">Cannot reach digitraffic.fi: ${esc(e.message)}</div>`; return; }
+  }
+  if (!state.snapshot) loadCauseNames().then(m => { state.causeNames = m; if (state.analysis) renderCauses(); }).catch(() => { });
   initReport().catch(e => console.warn('report init', e));
   startLive();
   runAnalysis();

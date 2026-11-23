@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rail Delay Intelligence</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="styles.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M4 15.5V6a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v9.5a3.5 3.5 0 0 1-3 3.46L19 21h-2.2l-2-2H9.2l-2 2H5l2-2.04A3.5 3.5 0 0 1 4 15.5ZM7 6v5h10V6H7Zm1.5 10a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Zm7 0a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z" fill="currentColor"/></svg>
+    <div><b>Rail Delay Intelligence</b><span>Finland · live open data → € → interventions</span></div>
+  </div>
+  <div class="controls">
+    <label>Period
+      <select id="days">
+        <option value="1">Yesterday</option><option value="3">Last 3 days</option><option value="7">Last 7 days</option>
+      </select>
+    </label>
+    <label class="toggle"><input type="checkbox" id="live" checked> Live trains</label>
+    <button id="theme" class="icon" title="Toggle theme" aria-label="Toggle theme">◐</button>
+  </div>
+</header>
+
+<section class="kpis" id="kpis" aria-live="polite"></section>
+
+<main class="grid">
+  <div class="mapwrap">
+    <div id="map" role="region" aria-label="Network map"></div>
+    <div class="legend" id="legend"></div>
+    <div class="status" id="status">Loading…</div>
+    <aside class="card fingerprint hidden" id="fp"></aside>
+  </div>
+
+  <div class="panel">
+    <nav class="tabs" role="tablist" id="tabs">
+      <button data-tab="opps" class="on">Opportunities</button>
+      <button data-tab="sections">Sections</button>
+      <button data-tab="stations">Stations</button>
+      <button data-tab="causes">Causes</button>
+      <button data-tab="whatif">What-if</button>
+      <button data-tab="history">History</button>
+      <button data-tab="report">AI report</button>
+      <button data-tab="assumptions">Assumptions</button>
+    </nav>
+    <section class="tab on" id="tab-opps"></section>
+    <section class="tab" id="tab-sections"></section>
+    <section class="tab" id="tab-stations"></section>
+    <section class="tab" id="tab-causes"></section>
+    <section class="tab" id="tab-whatif"></section>
+    <section class="tab" id="tab-history"></section>
+    <section class="tab" id="tab-report"></section>
+    <section class="tab" id="tab-assumptions"></section>
+  </div>
+</main>
+
+<footer class="foot">
+  Data: Fintraffic / digitraffic.fi, CC BY 4.0 · Map © OpenStreetMap contributors ·
+  All € figures are estimates; assumptions are editable. · Built as an AI-engineering demo for railway consulting.
+</footer>
+<script type="module" src="src/app.js"></script>
+</body>
+</html>

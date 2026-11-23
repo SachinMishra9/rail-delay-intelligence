@@ -2,6 +2,7 @@
 //   /System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc -m tests/run.mjs
 import { runAll } from './harness.js';
 import './analysis.test.js';
+import './report.test.js';
 
 const results = runAll();
 for (const r of results) print((r.ok ? 'PASS ' : 'FAIL ') + r.name + (r.ok ? '' : '\n     ' + r.error));

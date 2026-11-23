@@ -8,6 +8,7 @@
 <script type="module">
 import { runAll } from './harness.js';
 import './analysis.test.js';
+import './report.test.js';
 const results = runAll();
 const failed = results.filter(r => !r.ok).length;
 document.getElementById('sum').textContent = failed ? `FAIL: ${failed} of ${results.length} failed` : `ALL PASS: ${results.length}/${results.length}`;

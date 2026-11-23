@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rail Delay Intelligence tests</title>
+<style>body{font:14px/1.5 system-ui,sans-serif;margin:16px;max-width:800px}
+.ok{color:#0a7d33}.bad{color:#c0262d}pre{margin:0 0 0 1.5em;white-space:pre-wrap}#sum{font-weight:600;margin-bottom:8px}</style>
+</head><body>
+<h1>Tests</h1><div id="sum">Running...</div><div id="out"></div>
+<script type="module">
+import { runAll } from './harness.js';
+import './analysis.test.js';
+const results = runAll();
+const failed = results.filter(r => !r.ok).length;
+document.getElementById('sum').textContent = failed ? `FAIL: ${failed} of ${results.length} failed` : `ALL PASS: ${results.length}/${results.length}`;
+document.getElementById('sum').className = failed ? 'bad' : 'ok';
+document.getElementById('out').innerHTML = results.map(r =>
+  `<div class="${r.ok ? 'ok' : 'bad'}">${r.ok ? 'PASS' : 'FAIL'} ${r.name}${r.ok ? '' : `<pre>${r.error}</pre>`}</div>`).join('');
+</script></body></html>
